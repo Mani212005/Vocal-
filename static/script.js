@@ -1,4 +1,3 @@
-
 const toggleMicButton = document.getElementById('toggle-mic');
 const statusElement = document.getElementById('status');
 

@@ -1,123 +1,99 @@
 import os
-import asyncio
-import logging
+import sys
 import base64
-import tempfile
 import json
+import asyncio
+import websockets
+from dotenv import load_dotenv
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
-from dotenv import load_dotenv
-from sarvamai import AsyncSarvamAI
-from openai import AsyncOpenAI
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
+# Load environment variables from .env
 load_dotenv()
+
+SARVAM_WS_URL = os.getenv("SARVAM_WS_URL", "wss://api.sarvam.ai/speech-to-text-websocket")
+DEFAULT_LANGUAGE = os.getenv("DEFAULT_LANGUAGE", "en-IN")
+SAMPLE_RATE = int(os.getenv("SAMPLE_RATE", 16000))
+HIGH_VAD_SENSITIVITY = os.getenv("HIGH_VAD_SENSITIVITY", "false")
+API_KEY = os.getenv("SARVAM_API_KEY")
+
 app = FastAPI()
 
-# Mount the 'static' directory to serve static files
+# Mount static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL")
-
-llm_client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
-)
-
-@app.get("/")
-async def read_index():
-    return FileResponse('static/index.html')
-
-async def process_audio_chunk(audio_chunk: bytes, client: AsyncSarvamAI, retry: int = 0):
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as temp_audio_file:
-            temp_audio_file.write(audio_chunk)
-            temp_audio_file_path = temp_audio_file.name
-
-        job = await client.speech_to_text_job.create_job(
-            model="saarika:v2.5",
-            with_diarization=True,
-            with_timestamps=True,
-            language_code="en-IN",
-            num_speakers=1,
-        )
-        logging.info(f"Created STT job: {job._job_id}")
-
-        await job.upload_files(file_paths=[temp_audio_file_path])
-        await job.start()
-        logging.info("Transcription job started.")
-        await job.wait_until_complete(poll_interval=1, timeout=60)
-
-        if await job.is_failed():
-            status = await job.get_status()
-            logging.error(f"Transcription job failed: {status}")
-            return " "
-
-        result = await job.get_result()
-        os.remove(temp_audio_file_path)
-        
-        if result:
-            transcript_text = getattr(result, "text", None) or getattr(result, "transcript", None) or result.get("text") or result.get("transcript")
-            return transcript_text or ""
-        else:
-            return ""
-
-    except Exception as e:
-        if "TooManyRequests" in str(e) and retry < 3:
-            wait = 2 * (retry + 1)
-            logging.warning(f"Rate limit hit. Retrying in {wait}s...")
-            await asyncio.sleep(wait)
-            return await process_audio_chunk(audio_chunk, client, retry + 1)
-        else:
-            logging.error(f"Error processing audio chunk: {e}", exc_info=True)
-            return ""
-
-
+@app.get("/", response_class=HTMLResponse)
+async def get():
+    with open("static/index.html", "r") as f:
+        return HTMLResponse(content=f.read(), status_code=200)
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    logging.info("Client WebSocket connection accepted.")
-    client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
-    
-    try:
-        while True:
-            data = await websocket.receive_json()
-            if data['type'] == 'stop':
-                logging.info("Client sent STOP message.")
-                break
-            elif data['type'] == 'audio':
-                # The data is a base64 data URL, we need to extract the base64 part
-                header, encoded = data['data'].split(",", 1)
-                audio_chunk = base64.b64decode(encoded)
-                transcript = await process_audio_chunk(audio_chunk, client) 
-                if transcript:
-                    logging.info(f"Transcript: {transcript}")
-                    await websocket.send_text(f"Transcript: {transcript}")
-                    
-                    # Call the LLM with the transcript
-                    response = await llm_client.chat.completions.create(
-                        model=OPENROUTER_MODEL,
-                        messages=[
-                            {"role": "system", "content": "You are a helpful assistant."},
-                            {"role": "user", "content": transcript},
-                        ],
-                    )
-                    llm_response = response.choices[0].message.content
-                    logging.info(f"LLM Response: {llm_response}")
-                    await websocket.send_text(f"LLM: {llm_response}")
+    print("WebSocket connection established with client.")
 
+    if not API_KEY:
+        await websocket.send_text("Error: SARVAM_API_KEY missing. Please set it in .env file.")
+        await websocket.close()
+        return
+
+    try:
+        # Connect to Sarvam AI WebSocket
+        headers = [("Authorization", f"Bearer {API_KEY}")]
+        # async with websockets.connect(SARVAM_WS_URL, extra_headers=headers) as sarvam_ws:
+        async with websockets.connect(SARVAM_WS_URL, additional_headers=headers) as sarvam_ws:
+            print("Connected to Sarvam AI WebSocket.")
+
+            # Send config to Sarvam AI
+            config = {
+                "language-code": DEFAULT_LANGUAGE,
+                "high_vad_sensitivity": HIGH_VAD_SENSITIVITY,
+            }
+            await sarvam_ws.send(json.dumps({"event": "config", "data": config}))
+
+            while True:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+
+                if message["type"] == "audio":
+                    # Frontend sends base64, decode it
+                    audio_base64 = message["data"].split(",")[1] # Remove "data:audio/webm;base64," prefix
+                    
+                    # Send audio to Sarvam AI
+                    await sarvam_ws.send(json.dumps({
+                        "event": "transcribe",
+                        "data": {
+                            "audio": audio_base64,
+                            "sample_rate": SAMPLE_RATE,
+                            "encoding": "audio/webm", # Assuming webm from frontend
+                        }
+                    }))
+
+                    # Receive and forward transcription from Sarvam AI
+                    sarvam_response = await sarvam_ws.recv()
+                    sarvam_data = json.loads(sarvam_response)
+                    if "text" in sarvam_data:
+                        await websocket.send_text(sarvam_data["text"])
+                    elif "error" in sarvam_data:
+                        print(f"Sarvam AI Error: {sarvam_data['error']}")
+                        await websocket.send_text(f"Error: {sarvam_data['error']}")
+
+                elif message["type"] == "stop":
+                    print("Client requested to stop recording.")
+                    break
+
+    except websockets.exceptions.ConnectionClosedOK:
+        print("Sarvam AI WebSocket connection closed normally.")
     except WebSocketDisconnect:
-        logging.info("Client disconnected.")
+        print("Client WebSocket disconnected.")
     except Exception as e:
-        logging.error(f"WebSocket Error: {e}", exc_info=True)
+        print(f"An error occurred: {e}")
+        await websocket.send_text(f"Server error: {e}")
     finally:
-        logging.info("Closing client WebSocket connection.")
-        if websocket.client_state.value != 3: # 3 is DISCONNECTED
-            await websocket.close()
+        print("Closing client WebSocket connection.")
+        await websocket.close()
+
+# The command-line transcription part is removed as it's no longer the primary function.
+# If needed, it can be re-added as a separate utility or API endpoint. 
