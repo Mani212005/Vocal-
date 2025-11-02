@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LiveKit Voice Agent</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Voice Assistant</h1>
+        <div class="status" id="status">Disconnected</div>
+        <div class="mic-container">
+            <button id="micButton" class="mic-button" disabled>
+                <span class="mic-icon">🎤</span>
+                <span class="mic-text">Start</span>
+            </button>
+        </div>
+        <div class="transcript-container">
+            <h2>Conversation</h2>
+            <div id="transcript" class="transcript"></div>
+        </div>
+    </div>
+    <script type="module" src="/static/app.js"></script>
+</body>
+</html>
+
