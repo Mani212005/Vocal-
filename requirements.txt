@@ -1,6 +1,0 @@
-fastapi
-uvicorn
-websockets>=8.0
-python-dotenv
-aiohttp
-websocket-client
