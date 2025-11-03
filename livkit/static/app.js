@@ -1,8 +1,12 @@
-// LiveKit Voice Agent Web Client
-import { 
-    Room, 
-    Track
-} from 'https://unpkg.com/livekit-client@latest/dist/livekit-client.esm.min.js';
+// LiveKit Voice Agent Web Client (uses UMD build loaded in index.html)
+function getLivekit() {
+    // try common globals from UMD bundle (official: LivekitClient)
+    if (window.LivekitClient) return window.LivekitClient;
+    if (window.Livekit) return window.Livekit;
+    if (window.livekit) return window.livekit;
+    if (window.livekitClient) return window.livekitClient;
+    return null;
+}
 
 let room = null;
 let isRecording = false;
@@ -29,6 +33,12 @@ async function connectToRoom() {
         updateStatus('Connecting...');
         micButton.disabled = true;
         
+        // Ensure LiveKit client is available
+        const LK = getLivekit();
+        if (!LK) {
+            throw new Error('LiveKit client library failed to load. Try a hard refresh');
+        }
+
         // Get access token from server
         const response = await fetch('/api/token', {
             method: 'POST',
@@ -45,7 +55,7 @@ async function connectToRoom() {
         const { token, url, room: roomName } = await response.json();
         
         // Connect to LiveKit room
-        room = new Room();
+        room = new LK.Room();
         
         // Set up event handlers
         room.on('connected', () => {
@@ -61,7 +71,7 @@ async function connectToRoom() {
         });
         
         room.on('trackSubscribed', (track, publication, participant) => {
-            if (track.kind === Track.Kind.Audio) {
+            if (track.kind === (getLivekit().Track.Kind.Audio)) {
                 // Play audio from the assistant
                 const audioElement = track.attach();
                 document.body.appendChild(audioElement);
@@ -70,13 +80,13 @@ async function connectToRoom() {
         });
         
         room.on('localTrackPublished', (publication, participant) => {
-            if (publication.kind === Track.Kind.Audio) {
+            if (publication.kind === (getLivekit().Track.Kind.Audio)) {
                 updateStatus('Recording');
             }
         });
         
         room.on('localTrackUnpublished', (publication, participant) => {
-            if (publication.kind === Track.Kind.Audio) {
+            if (publication.kind === (getLivekit().Track.Kind.Audio)) {
                 updateStatus('Connected');
             }
         });
